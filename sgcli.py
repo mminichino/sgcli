@@ -24,7 +24,7 @@ else:
 
 def usage():
     print("NetApp StorageGRID CLI")
-    print("Usage: " + sys.argv[0] + " [-l] [-v] [-d] [-g] [-o bucket/object] [-a admin_node_host] [-e end_point] [-n node_search] [-p profile]")
+    print("Usage: " + sys.argv[0] + " [-l] [-v] [-d] [-g] [-f] [-o bucket/object] [-a admin_node_host] [-e end_point] [-n node_search] [-p profile]")
     print("")
     print("-h  Print this message")
     print("-o  Lookup object bucket/object_name")
@@ -32,6 +32,7 @@ def usage():
     print("-l  Prompt for username and password, login and save auth token")
     print("-e  Endpoint for bucket operations")
     print("-p  AWS profile for authentication ($HOME/.aws/credentials")
+    print("-f  Format listing output in CSV format")
     print("-n  Limit results by node name")
     print("-g  Display Grid Node metrics")
     print("-d  Debug")
