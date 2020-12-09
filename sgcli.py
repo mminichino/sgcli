@@ -12,6 +12,7 @@ import urllib3
 import json
 import readline
 import datetime
+import threading
 import signal
 import boto3
 import botocore
@@ -24,7 +25,7 @@ else:
 
 def usage():
     print("NetApp StorageGRID CLI")
-    print("Usage: " + sys.argv[0] + " [-l] [-v] [-d] [-g] [-f] [-o bucket/object] [-a admin_node_host] [-e end_point] [-n node_search] [-p profile]")
+    print("Usage: " + sys.argv[0] + " [-l] [-v] [-d] [-g] [-f] [-o bucket/object] [-a admin_node_host] [-e end_point] [-n node_search] [-p profile] [-t threads]")
     print("")
     print("-h  Print this message")
     print("-o  Lookup object bucket/object_name")
@@ -35,6 +36,7 @@ def usage():
     print("-f  Format listing output in CSV format")
     print("-n  Limit results by node name")
     print("-g  Display Grid Node metrics")
+    print("-t  Threads (32 by default)")
     print("-d  Debug")
 
 def myinput(prompt, prefill):
@@ -96,9 +98,10 @@ class parse_args:
         self.debugFlag = False
         self.gridMetrics = False
         self.argCount = 0
+        self.threadCount = 32
 
     def parse(self):
-        options, remainder = getopt.getopt(sys.argv[1:], 'gdfhvlo:a:p:n:e:', self.arglist)
+        options, remainder = getopt.getopt(sys.argv[1:], 'gdfhvlo:a:p:n:e:t:', self.arglist)
 
         self.argCount = len(options)
         for opt, arg in options:
@@ -112,6 +115,12 @@ class parse_args:
                 self.searchNode = arg
             elif opt in ('-e', '--endpoint'):
                 self.endPoint = arg
+            elif opt in ('-t', '--threads'):
+                try:
+                    self.threadCount = int(arg)
+                except ValueError as e:
+                    print("Threads must be a number.")
+                    sys.exit(1)
             elif opt in ('-v', '--verbose'):
                 self.verboseFlag = True
             elif opt in ('-l', '--login'):
@@ -140,6 +149,7 @@ class auth_token:
         self.formatFlag = self.argset.formatFlag
         self.gridMetrics = self.argset.gridMetrics
         self.searchNode = self.argset.searchNode
+        self.threadCount = self.argset.threadCount
         self.authToken = None
         self.homeDir = os.environ.get('HOME')
         self.authPath = self.homeDir + '/.storagegrid'
@@ -195,8 +205,17 @@ class auth_token:
                         print("Error: can not create auth directory: %s" % str(e))
                         sys.exit(1)
                 try:
+                    lines = []
+                    if os.path.isfile(self.authFile):
+                        with open(self.authFile, "r") as authFile:
+                            lines = authFile.readlines()
+                        authFile.close()
                     with open(self.authFile, 'w') as authFile:
-                        authFile.write(self.authToken)
+                        auth_entry = self.adminNode + ':' + self.authToken + '\n'
+                        authFile.write(auth_entry)
+                        for line in lines:
+                            if not re.search(self.adminNode, line):
+                                authFile.write(line)
                     authFile.close()
                 except OSError as e:
                     print("Could not write auth file: %s" % str(e))
@@ -204,12 +223,19 @@ class auth_token:
 
     def readToken(self):
 
-        authFile = open(self.authFile, "r")
-
-        self.authToken = authFile.readline()
-        self.authToken = self.authToken.rstrip("\n")
+        admin_node = self.adminNode
+        with open(self.authFile, "r") as authFile:
+            for line in authFile:
+                line = line.rstrip("\n")
+                split_line = line.split(':', 1)
+                if split_line[0] == admin_node:
+                    self.authToken = split_line[1]
+                    self.adminNode = split_line[0]
 
         authFile.close()
+        if not self.authToken:
+            print("Auth token not found. Please login first.")
+            sys.exit(1)
 
 class storagegrid:
 
@@ -224,7 +250,9 @@ class storagegrid:
         self.formatFlag = self.token.formatFlag
         self.searchNode = self.token.searchNode
         self.endPoint = self.token.endPoint
+        self.threadCount = self.token.threadCount
         self.bucketObjects = []
+        self.grid_topology_loaded = 0
         config = Config(
             retries={
                 'max_attempts': 10,
@@ -299,7 +327,9 @@ class storagegrid:
     def objectList(self, lookup, node=None):
 
         self.objectLookup(lookup)
-        self.getGridTopology()
+        if self.grid_topology_loaded == 0:
+            self.getGridTopology()
+            self.grid_topology_loaded = 1
 
         objlocation = []
         objsegtype = []
@@ -352,6 +382,13 @@ class storagegrid:
         bucket_name, obj_pattern = lookup.split('/')
         obj_pattern = re.sub('\*', '.+', obj_pattern)
         obj_pattern = '^' + obj_pattern + '$'
+        thread_set = []
+        thread_stat = []
+        threads = self.threadCount
+
+        for i in range(threads):
+            thread_stat.append(0)
+            thread_set.append(0)
 
         try:
             bucket_region = self.s3.get_bucket_location(Bucket=bucket_name)
@@ -366,7 +403,23 @@ class storagegrid:
                 block = self.s3.list_objects_v2(**kwargs)
                 for obj_entry in block['Contents']:
                     if re.search(obj_pattern, obj_entry['Key']):
-                        self.objectList(bucket_name + '/' + obj_entry['Key'])
+                        thread_found = 0
+                        while True:
+                            for x in range(threads):
+                                if thread_stat[x] == 0:
+                                    thread_found = 1
+                                    thread_stat[x] = 1
+                                    thread_set[x] = threading.Thread(target=self.objectList,
+                                                                     args=(bucket_name + '/' + obj_entry['Key'],))
+                                    thread_set[x].start()
+                                    break
+                            if thread_found == 1:
+                                break
+                            else:
+                                for y in range(threads):
+                                    if thread_stat[y] == 1:
+                                        if not thread_set[y].is_alive():
+                                            thread_stat[y] = 0
                 if block['IsTruncated']:
                     kwargs['ContinuationToken'] = block['NextContinuationToken']
                 else:
@@ -374,6 +427,10 @@ class storagegrid:
         except (botocore.exceptions.ClientError, botocore.exceptions.EndpointConnectionError) as e:
             print("Error: can not connect to bucket %s: %s" % (bucket_name,str(e)))
             sys.exit(1)
+
+        for y in range(threads):
+            if thread_stat[y] == 1:
+                thread_set[y].join()
 
     def gridStatus(self):
 
