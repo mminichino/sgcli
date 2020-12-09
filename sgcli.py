@@ -14,6 +14,7 @@ import readline
 import datetime
 import threading
 import signal
+import queue
 import boto3
 import botocore
 from botocore.config import Config
@@ -156,14 +157,6 @@ class auth_token:
         self.authFile = self.authPath + '/auth'
         self.awsProfile = self.argset.awsProfile
         self.endPoint = self.argset.endPoint
-        try:
-            if self.awsProfile:
-                self.s3session = boto3.Session(profile_name=self.awsProfile,)
-            else:
-                self.s3session = boto3.Session(profile_name="default",)
-        except botocore.exceptions.ProfileNotFound as e:
-            print("Error: %s" % str(e))
-            sys.exit(1)
 
     def genToken(self):
 
@@ -251,15 +244,15 @@ class storagegrid:
         self.searchNode = self.token.searchNode
         self.endPoint = self.token.endPoint
         self.threadCount = self.token.threadCount
+        self.awsProfile = self.token.awsProfile
         self.bucketObjects = []
-        self.grid_topology_loaded = 0
-        config = Config(
+        self.getGridTopology()
+        self.awsConfig = Config(
             retries={
                 'max_attempts': 10,
                 'mode': 'standard'
             }
         )
-        self.s3 = self.token.s3session.client('s3', endpoint_url=self.endPoint, verify=False, config=config)
 
     def objectLookup(self, lookup):
 
@@ -278,7 +271,10 @@ class storagegrid:
         json_post = json.dumps(post_data)
 
         response = requests.post(url, data=json_post, headers=headers, verify=False)
-        self.object_data = json.loads(response.text)
+        #self.object_data = json.loads(response.text)
+        object_data = json.loads(response.text)
+        #q.put(object_data)
+        return object_data
 
     def getGridTopology(self):
 
@@ -326,11 +322,6 @@ class storagegrid:
 
     def objectList(self, lookup, node=None):
 
-        self.objectLookup(lookup)
-        if self.grid_topology_loaded == 0:
-            self.getGridTopology()
-            self.grid_topology_loaded = 1
-
         objlocation = []
         objsegtype = []
         objname = ''
@@ -338,26 +329,31 @@ class storagegrid:
         objrep = ''
         objbucket = ''
         objmodtime = ''
+        object_data = self.objectLookup(lookup)
+
+        if 'message' in object_data:
+            print("Error: %s" % object_data['message']['text'])
+            sys.exit(1)
 
         if self.verboseFlag:
-            print(json.dumps(self.object_data, indent=2))
+            print(json.dumps(object_data, indent=2))
         else:
-            if 'data' in self.object_data:
-                objname = self.object_data['data']['name']
-                objsize = formatSize(self.object_data['data']['objectSizeBytes'])
-                objbucket = self.object_data['data']['container']
-                objmodtime = self.object_data['data']['modifiedTime']
+            if 'data' in object_data:
+                objname = object_data['data']['name']
+                objsize = formatSize(object_data['data']['objectSizeBytes'])
+                objbucket = object_data['data']['container']
+                objmodtime = object_data['data']['modifiedTime']
                 date_time = datetime.datetime.strptime(objmodtime, '%Y-%m-%dT%H:%M:%S.%fZ')
                 objmodtime = date_time.strftime("%m/%d/%y %I:%M%p")
-                for x in range(len(self.object_data['data']['locations'])):
-                    if self.object_data['data']['locations'][x]['type'] == "erasureCoded":
+                for x in range(len(object_data['data']['locations'])):
+                    if object_data['data']['locations'][x]['type'] == "erasureCoded":
                         objrep = "EC"
-                        for y in range(len(self.object_data['data']['locations'][x]['fragments'])):
-                            objlocation.append(self.grid_node_list[self.object_data['data']['locations'][x]['fragments'][y]['nodeId']]['name'])
-                            objsegtype.append(self.object_data['data']['locations'][x]['fragments'][y]['type'])
-                    if self.object_data['data']['locations'][x]['type'] == "replicated":
+                        for y in range(len(object_data['data']['locations'][x]['fragments'])):
+                            objlocation.append(self.grid_node_list[object_data['data']['locations'][x]['fragments'][y]['nodeId']]['name'])
+                            objsegtype.append(object_data['data']['locations'][x]['fragments'][y]['type'])
+                    if object_data['data']['locations'][x]['type'] == "replicated":
                         objrep = "Replicated"
-                        objlocation.append(self.grid_node_list[self.object_data['data']['locations'][x]['nodeId']]['name'])
+                        objlocation.append(self.grid_node_list[object_data['data']['locations'][x]['nodeId']]['name'])
                         objsegtype.append("copy")
 
             if self.searchNode:
@@ -377,21 +373,21 @@ class storagegrid:
                     print("%s => %s " % (objsegtype[x], objlocation[x]), end='')
                 print("")
 
-    def listBucket(self, lookup):
-
-        bucket_name, obj_pattern = lookup.split('/')
-        obj_pattern = re.sub('\*', '.+', obj_pattern)
-        obj_pattern = '^' + obj_pattern + '$'
-        thread_set = []
-        thread_stat = []
-        threads = self.threadCount
-
-        for i in range(threads):
-            thread_stat.append(0)
-            thread_set.append(0)
+    def list_object_thread(self, obj_pattern, bucket_name, q):
 
         try:
-            bucket_region = self.s3.get_bucket_location(Bucket=bucket_name)
+            if self.awsProfile:
+                thread_s3session = boto3.Session(profile_name=self.awsProfile,)
+            else:
+                thread_s3session = boto3.Session(profile_name="default",)
+        except botocore.exceptions.ProfileNotFound as e:
+            print("Error: %s" % str(e))
+            sys.exit(1)
+
+        thread_s3 = thread_s3session.client('s3', endpoint_url=self.endPoint, verify=False, config=self.awsConfig)
+
+        try:
+            bucket_region = thread_s3.get_bucket_location(Bucket=bucket_name)
             self.bucketRegion = bucket_region
         except RecursionError as e:
             print("Error: connection to %s failed." % self.endPoint)
@@ -400,26 +396,10 @@ class storagegrid:
         try:
             kwargs = {'Bucket': bucket_name}
             while True:
-                block = self.s3.list_objects_v2(**kwargs)
+                block = thread_s3.list_objects_v2(**kwargs)
                 for obj_entry in block['Contents']:
                     if re.search(obj_pattern, obj_entry['Key']):
-                        thread_found = 0
-                        while True:
-                            for x in range(threads):
-                                if thread_stat[x] == 0:
-                                    thread_found = 1
-                                    thread_stat[x] = 1
-                                    thread_set[x] = threading.Thread(target=self.objectList,
-                                                                     args=(bucket_name + '/' + obj_entry['Key'],))
-                                    thread_set[x].start()
-                                    break
-                            if thread_found == 1:
-                                break
-                            else:
-                                for y in range(threads):
-                                    if thread_stat[y] == 1:
-                                        if not thread_set[y].is_alive():
-                                            thread_stat[y] = 0
+                        q.put(obj_entry)
                 if block['IsTruncated']:
                     kwargs['ContinuationToken'] = block['NextContinuationToken']
                 else:
@@ -427,6 +407,51 @@ class storagegrid:
         except (botocore.exceptions.ClientError, botocore.exceptions.EndpointConnectionError) as e:
             print("Error: can not connect to bucket %s: %s" % (bucket_name,str(e)))
             sys.exit(1)
+
+        q.put(None)
+        return
+
+    def listBucket(self, lookup):
+
+        bucket_name, obj_pattern = lookup.split('/')
+        obj_pattern = re.sub('\*', '.+', obj_pattern)
+        obj_pattern = '^' + obj_pattern + '$'
+        thread_set = []
+        thread_stat = []
+        threads = self.threadCount
+        q = queue.Queue()
+
+        for i in range(threads):
+            thread_stat.append(0)
+            thread_set.append(0)
+
+        list_thread = threading.Thread(target=self.list_object_thread, args=(obj_pattern, bucket_name, q,))
+        list_thread.start()
+
+        for obj_entry in iter(q.get, None):
+
+            if not obj_entry:
+                break
+
+            thread_found = 0
+            while True:
+                for x in range(threads):
+                    if thread_stat[x] == 0:
+                        thread_found = 1
+                        thread_stat[x] = 1
+                        thread_set[x] = threading.Thread(target=self.objectList,
+                                                         args=(bucket_name + '/' + obj_entry['Key'],))
+                        thread_set[x].start()
+                        break
+                if thread_found == 1:
+                    break
+                else:
+                    for y in range(threads):
+                        if thread_stat[y] == 1:
+                            if not thread_set[y].is_alive():
+                                thread_stat[y] = 0
+
+        list_thread.join()
 
         for y in range(threads):
             if thread_stat[y] == 1:
