@@ -365,7 +365,7 @@ class storagegrid:
                     return
 
             if self.formatFlag:
-                print("%s,%s,%s,%s,%s" % (objbucket, objname, objsize, objmodtime, objrep), end='')
+                print("%s,%s,%s,%s,%s," % (objbucket, objname, objsize, objmodtime, objrep), end='')
                 for x in range(len(objlocation)):
                     if x == len(objlocation) - 1:
                         print("%s,%s" % (objsegtype[x], objlocation[x]))
