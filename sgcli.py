@@ -271,9 +271,8 @@ class storagegrid:
         json_post = json.dumps(post_data)
 
         response = requests.post(url, data=json_post, headers=headers, verify=False)
-        #self.object_data = json.loads(response.text)
         object_data = json.loads(response.text)
-        #q.put(object_data)
+
         return object_data
 
     def getGridTopology(self):
@@ -323,12 +322,14 @@ class storagegrid:
     def objectList(self, lookup, node=None):
 
         objlocation = []
+        objsite = []
         objsegtype = []
         objname = ''
         objsize = ''
         objrep = ''
         objbucket = ''
-        objmodtime = ''
+        objtime = None
+        objfmttime = ''
         object_data = self.objectLookup(lookup)
 
         if 'message' in object_data:
@@ -340,20 +341,22 @@ class storagegrid:
         else:
             if 'data' in object_data:
                 objname = object_data['data']['name']
-                objsize = formatSize(object_data['data']['objectSizeBytes'])
+                objsize = object_data['data']['objectSizeBytes']
                 objbucket = object_data['data']['container']
                 objmodtime = object_data['data']['modifiedTime']
-                date_time = datetime.datetime.strptime(objmodtime, '%Y-%m-%dT%H:%M:%S.%fZ')
-                objmodtime = date_time.strftime("%m/%d/%y %I:%M%p")
+                objtime = datetime.datetime.strptime(objmodtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                objfmttime = objtime.strftime("%m/%d/%y %I:%M%p")
                 for x in range(len(object_data['data']['locations'])):
                     if object_data['data']['locations'][x]['type'] == "erasureCoded":
                         objrep = "EC"
                         for y in range(len(object_data['data']['locations'][x]['fragments'])):
                             objlocation.append(self.grid_node_list[object_data['data']['locations'][x]['fragments'][y]['nodeId']]['name'])
+                            objsite.append(self.grid_node_list[object_data['data']['locations'][x]['fragments'][y]['nodeId']]['site'])
                             objsegtype.append(object_data['data']['locations'][x]['fragments'][y]['type'])
                     if object_data['data']['locations'][x]['type'] == "replicated":
                         objrep = "Replicated"
                         objlocation.append(self.grid_node_list[object_data['data']['locations'][x]['nodeId']]['name'])
+                        objsite.append(self.grid_node_list[object_data['data']['locations'][x]['nodeId']]['site'])
                         objsegtype.append("copy")
 
             if self.searchNode:
@@ -361,16 +364,16 @@ class storagegrid:
                     return
 
             if self.formatFlag:
-                print("%s,%s,%s,%s,%s," % (objbucket, objname, objsize, objmodtime, objrep), end='')
+                print("%s,%s,%s,%s,%s," % (objbucket, objname, objsize, objtime.timestamp(), objrep), end='')
                 for x in range(len(objlocation)):
                     if x == len(objlocation) - 1:
-                        print("%s,%s" % (objsegtype[x], objlocation[x]))
+                        print("%s,%s,%s" % (objsegtype[x], objsite[x], objlocation[x]))
                     else:
-                        print("%s,%s," % (objsegtype[x], objlocation[x]), end='')
+                        print("%s,%s,%s," % (objsegtype[x], objsite[x], objlocation[x]), end='')
             else:
-                print("[%s]/%s %s %s %s " % (objbucket, objname, objsize, objmodtime, objrep), end='')
+                print("%s/%s %s %s %s " % (objbucket, objname, formatSize(objsize), objfmttime, objrep), end='')
                 for x in range(len(objlocation)):
-                    print("%s => %s " % (objsegtype[x], objlocation[x]), end='')
+                    print("%s > [%s]/%s " % (objsegtype[x], objsite[x], objlocation[x]), end='')
                 print("")
 
     def list_object_thread(self, obj_pattern, bucket_name, q):
