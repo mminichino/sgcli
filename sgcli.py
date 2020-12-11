@@ -483,19 +483,21 @@ class storagegrid:
 
         self.getGridTopology()
 
-        print("%s %s %s %s" % (str("Node Name").ljust(16),
+        print("%s %s %s %s" % (str("Node").ljust(20),
                                  str("Total Space").ljust(14),
                                  str("Free Space").ljust(14),
                                  str("Used Percent")))
 
         for x in range(len(self.grid_total_space['data']['result'])):
+            node_site = self.grid_node_list[self.grid_total_space['data']['result'][x]['metric']['node_id']]['site']
             node_name = self.grid_node_list[self.grid_total_space['data']['result'][x]['metric']['node_id']]['name']
             node_total = self.grid_total_space['data']['result'][x]['value'][1]
             node_usable = self.grid_usable_space['data']['result'][x]['value'][1]
             node_pct_full = int(node_usable) / int(node_total)
             node_pct_full = round(100 - (node_pct_full * 100))
+            print_name = node_site + '/' + node_name
 
-            print("%s %s %s %d%%" % (str(node_name).ljust(16),
+            print("%s %s %s %d%%" % (str(print_name).ljust(20),
                                      str(formatSize(int(node_total))).ljust(14),
                                      str(formatSize(int(node_usable))).ljust(14),
                                      node_pct_full))
